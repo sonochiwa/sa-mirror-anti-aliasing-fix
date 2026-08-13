@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Configure MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release Win32
+        run: msbuild MirrorAntiAliasingFix.sln /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /m
+
+      - name: Validate tag and prepare archive
+        id: package
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Tag '$tag' is not a semantic release tag."
+          }
+
+          $version = $Matches.version
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $escaped = [regex]::Escape($version)
+          $sectionPattern = "(?ms)^##[ \t]+$escaped(?:[ \t]+-[^\r\n]+)?[ \t]*\r?\n(?<body>.*?)(?=^##[ \t]+|\z)"
+          $section = [regex]::Match($changelog, $sectionPattern)
+          if (-not $section.Success) {
+            throw "CHANGELOG.md has no section for $version."
+          }
+
+          $iniHeader = Get-Content Config\MirrorAntiAliasingFix.ini -TotalCount 1
+          if ($iniHeader -ne "# Mirror Anti-Aliasing Fix v$version") {
+            throw "INI version does not match tag $tag."
+          }
+          $packageHeader = Get-Content packaging\README.txt -TotalCount 1
+          if ($packageHeader -ne "Mirror Anti-Aliasing Fix v$version") {
+            throw "Package README version does not match tag $tag."
+          }
+
+          $archiveBase = "MirrorAntiAliasingFix-v$version"
+          $staging = "build\release\$archiveBase"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item build\MirrorAntiAliasingFix.asi $staging
+          Copy-Item Config\MirrorAntiAliasingFix.ini $staging
+          Copy-Item packaging\README.txt $staging
+
+          $archive = "build\$archiveBase.zip"
+          Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $staging).FullName `
+            -DestinationPath $archive -CompressionLevel Optimal
+
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $archiveBase.zip" | Set-Content "$archive.sha256" -Encoding ascii
+          $section.Groups['body'].Value.Trim() | Set-Content build\release-notes.md -Encoding utf8
+
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "checksum=$archive.sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Attest release archive
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' `
+            '${{ steps.package.outputs.archive }}' `
+            '${{ steps.package.outputs.checksum }}' `
+            --title 'Mirror Anti-Aliasing Fix ${{ github.ref_name }}' `
+            --notes-file build\release-notes.md
