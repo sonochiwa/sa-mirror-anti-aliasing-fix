@@ -101,7 +101,9 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releaseExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($releaseExists) {
             "publish=false" >> $env:GITHUB_OUTPUT
           } else {
             "publish=true" >> $env:GITHUB_OUTPUT
