@@ -9,6 +9,5 @@ Installation:
 3. Start the game.
 
 Set supersample to 1, 2, 4 or 8 in MirrorAntiAliasingFix.ini. A mirror pass draws
-the whole reflected scene, so each step costs four times the pixels; 2 is the
-default for that reason.
+the whole reflected scene, so each step costs four times the pixels.
 Source code: https://github.com/sonochiwa/sa-mirror-anti-aliasing-fix

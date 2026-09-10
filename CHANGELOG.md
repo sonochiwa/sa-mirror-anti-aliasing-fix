@@ -12,9 +12,8 @@
 - Added reduction through a chain of exact 2:1 steps, so the bilinear filter in
   `StretchRect` acts as a box filter instead of discarding most of the rendered
   image.
-- Replaced `sampleCount` with `supersample`, defaulting to `2`. A mirror pass
+- Replaced `sampleCount` with `supersample`, defaulting to `4`. A mirror pass
   draws the whole reflected scene, so each step costs four times the pixels.
-- Added `isEnabled` and an optional diagnostic log.
 - Removed the `DefinedState` hook, which existed only to re-assert the
   multisample render state.
 

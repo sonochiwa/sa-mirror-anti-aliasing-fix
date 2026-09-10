@@ -2,10 +2,8 @@
 #include <windows.h>
 #include <d3d9.h>
 
-#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <limits>
@@ -34,37 +32,11 @@ IDirect3DSurface9* g_resolveColor = nullptr;
 IDirect3DSurface9* g_resolveDepth = nullptr;
 D3DSURFACE_DESC g_colorDesc = {};
 D3DFORMAT g_depthFormat = D3DFMT_UNKNOWN;
-int g_requestedFactor = 2;
+int g_requestedFactor = 4;
 int g_activeFactor = 0;
-bool g_enabled = true;
-bool g_logging = false;
 bool g_resolveActive = false;
-bool g_reportedResolve = false;
 bool g_installed = false;
 wchar_t g_iniPath[MAX_PATH] = {};
-wchar_t g_logPath[MAX_PATH] = {};
-
-void Log(const char* format, ...) {
-    if (!g_logging || g_logPath[0] == L'\0')
-        return;
-
-    FILE* file = nullptr;
-    if (_wfopen_s(&file, g_logPath, L"a") != 0 || !file)
-        return;
-
-    SYSTEMTIME now = {};
-    GetLocalTime(&now);
-    fprintf(file, "[%02u:%02u:%02u.%03u] ", now.wHour, now.wMinute, now.wSecond,
-            now.wMilliseconds);
-
-    va_list args;
-    va_start(args, format);
-    vfprintf(file, format, args);
-    va_end(args);
-
-    fputc('\n', file);
-    fclose(file);
-}
 
 template <typename T>
 bool SafeRead(uintptr_t address, T& result) {
@@ -122,14 +94,9 @@ void LoadConfiguration(HMODULE module) {
     const size_t room = static_cast<size_t>(MAX_PATH - (slash + 1 - basePath));
     wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix.ini");
     wcscpy_s(g_iniPath, basePath);
-    wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix.log");
-    wcscpy_s(g_logPath, basePath);
-
-    g_enabled = GetPrivateProfileIntW(L"general", L"isEnabled", 1, g_iniPath) != 0;
-    g_logging = GetPrivateProfileIntW(L"general", L"logging", 0, g_iniPath) != 0;
 
     const int configured = GetPrivateProfileIntW(L"antiAliasing", L"supersample",
-                                                 2, g_iniPath);
+                                                 4, g_iniPath);
     if (configured >= 8)
         g_requestedFactor = 8;
     else if (configured >= 4)
@@ -138,11 +105,6 @@ void LoadConfiguration(HMODULE module) {
         g_requestedFactor = 2;
     else
         g_requestedFactor = 1;
-
-    if (g_logging)
-        DeleteFileW(g_logPath);
-    Log("Mirror Anti-Aliasing Fix loaded: isEnabled=%d supersample=%d",
-        g_enabled ? 1 : 0, g_requestedFactor);
 }
 
 IDirect3DDevice9* GetDevice() {
@@ -241,23 +203,14 @@ bool CreateResolveTargets(IDirect3DDevice9* device,
                         color.Width * static_cast<UINT>(step),
                         color.Height * static_cast<UINT>(step), color.Format,
                         D3DMULTISAMPLE_NONE, 0, FALSE, &stage, nullptr))) {
-                    Log("downsample stage %dx could not be created", step);
                     ReleaseDownsampleChain();
                     break;
                 }
                 g_downsampleChain[g_downsampleCount++] = stage;
             }
-
-            Log("created %ux%u supersampled pair for a %ux%u mirror (%dx), "
-                "color format %u, depth format %u, %d intermediate stage(s)",
-                width, height, color.Width, color.Height, factor,
-                static_cast<unsigned>(color.Format),
-                static_cast<unsigned>(depth.Format), g_downsampleCount);
             return true;
         }
 
-        Log("%dx supersampling rejected: color 0x%08X, depth 0x%08X", factor,
-            static_cast<unsigned>(colorResult), static_cast<unsigned>(depthResult));
         if (depthSurface)
             depthSurface->Release();
         if (colorSurface)
@@ -265,7 +218,6 @@ bool CreateResolveTargets(IDirect3DDevice9* device,
         factor /= 2;
     }
 
-    Log("no supersampling factor accepted for %ux%u", color.Width, color.Height);
     return false;
 }
 
@@ -312,9 +264,6 @@ int __cdecl RsCameraBeginUpdateHook(void* camera) {
     if (!device)
         return result;
 
-    if (!g_enabled)
-        return result;
-
     ReleaseFrameSurfaces();
     if (FAILED(device->GetRenderTarget(0, &g_resolveColor)) || !g_resolveColor ||
         FAILED(device->GetDepthStencilSurface(&g_resolveDepth)) || !g_resolveDepth) {
@@ -352,32 +301,21 @@ void* __cdecl RwCameraEndUpdateHook(void* camera) {
         device->SetDepthStencilSurface(nullptr);
         HRESULT targetResult = device->SetRenderTarget(0, g_resolveColor);
         HRESULT depthResult = device->SetDepthStencilSurface(g_resolveDepth);
-        HRESULT resolveResult = E_FAIL;
         if (SUCCEEDED(targetResult) && SUCCEEDED(depthResult)) {
             const D3DTEXTUREFILTERTYPE filter =
                 g_activeFactor > 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
             IDirect3DSurface9* stageSource = g_msaaColor;
-            resolveResult = S_OK;
-            for (int i = 0; i < g_downsampleCount && SUCCEEDED(resolveResult);
-                 ++i) {
-                resolveResult =
-                    device->StretchRect(stageSource, nullptr,
-                                        g_downsampleChain[i], nullptr,
-                                        D3DTEXF_LINEAR);
+            HRESULT reduction = S_OK;
+            for (int i = 0; i < g_downsampleCount && SUCCEEDED(reduction); ++i) {
+                reduction = device->StretchRect(stageSource, nullptr,
+                                                g_downsampleChain[i], nullptr,
+                                                D3DTEXF_LINEAR);
                 stageSource = g_downsampleChain[i];
             }
-            if (SUCCEEDED(resolveResult)) {
-                resolveResult = device->StretchRect(
-                    stageSource, nullptr, g_resolveColor, nullptr, filter);
+            if (SUCCEEDED(reduction)) {
+                device->StretchRect(stageSource, nullptr, g_resolveColor,
+                                    nullptr, filter);
             }
-        }
-
-        if (!g_reportedResolve) {
-            g_reportedResolve = true;
-            Log("first resolve: target 0x%08X depth 0x%08X reduction 0x%08X",
-                static_cast<unsigned>(targetResult),
-                static_cast<unsigned>(depthResult),
-                static_cast<unsigned>(resolveResult));
         }
     }
 
