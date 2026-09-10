@@ -2,8 +2,10 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <limits>
@@ -16,25 +18,57 @@ constexpr size_t kBeforeMainRenderScanSize = 0x180;
 constexpr uintptr_t kRsCameraBeginUpdate = 0x00619450;
 constexpr uintptr_t kRwCameraEndUpdate = 0x007EE180;
 constexpr uintptr_t kRwD3D9GetCurrentDevice = 0x007F9D50;
-constexpr uintptr_t kDefinedState = 0x00734650;
 
 using RsCameraBeginUpdateFn = int(__cdecl*)(void*);
 using RwCameraEndUpdateFn = void*(__cdecl*)(void*);
 using GetD3DDeviceFn = void*(__cdecl*)();
 
+constexpr int kMaxDownsampleStages = 3;
+
 IDirect3DDevice9* g_surfaceDevice = nullptr;
 IDirect3DSurface9* g_msaaColor = nullptr;
 IDirect3DSurface9* g_msaaDepth = nullptr;
+IDirect3DSurface9* g_downsampleChain[kMaxDownsampleStages] = {};
+int g_downsampleCount = 0;
 IDirect3DSurface9* g_resolveColor = nullptr;
 IDirect3DSurface9* g_resolveDepth = nullptr;
 D3DSURFACE_DESC g_colorDesc = {};
 D3DFORMAT g_depthFormat = D3DFMT_UNKNOWN;
-D3DMULTISAMPLE_TYPE g_activeSamples = D3DMULTISAMPLE_NONE;
-int g_requestedSamples = 8;
+int g_requestedFactor = 2;
+int g_activeFactor = 0;
+bool g_enabled = true;
+bool g_logging = false;
+bool g_dumpEnabled = false;
+bool g_dumpPending = false;
+int g_dumpIndex = 0;
 bool g_resolveActive = false;
+bool g_reportedResolve = false;
 bool g_installed = false;
-bool g_haveOldMultisampleState = false;
-DWORD g_oldMultisampleState = FALSE;
+wchar_t g_iniPath[MAX_PATH] = {};
+wchar_t g_logPath[MAX_PATH] = {};
+wchar_t g_dumpBasePath[MAX_PATH] = {};
+
+void Log(const char* format, ...) {
+    if (!g_logging || g_logPath[0] == L'\0')
+        return;
+
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, g_logPath, L"a") != 0 || !file)
+        return;
+
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+    fprintf(file, "[%02u:%02u:%02u.%03u] ", now.wHour, now.wMinute, now.wSecond,
+            now.wMilliseconds);
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+
+    fputc('\n', file);
+    fclose(file);
+}
 
 template <typename T>
 bool SafeRead(uintptr_t address, T& result) {
@@ -80,27 +114,44 @@ bool WriteMemory(void* destination, const void* source, size_t size) {
 }
 
 void LoadConfiguration(HMODULE module) {
-    wchar_t iniPath[MAX_PATH] = {};
-    const DWORD length = GetModuleFileNameW(module, iniPath, MAX_PATH);
+    wchar_t basePath[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameW(module, basePath, MAX_PATH);
     if (length == 0 || length >= MAX_PATH)
         return;
 
-    wchar_t* slash = wcsrchr(iniPath, L'\\');
+    wchar_t* slash = wcsrchr(basePath, L'\\');
     if (!slash)
         return;
-    wcscpy_s(slash + 1, static_cast<size_t>(MAX_PATH - (slash + 1 - iniPath)),
-             L"MirrorAntiAliasingFix.ini");
 
-    const int configured = GetPrivateProfileIntW(L"antiAliasing", L"sampleCount",
-                                                   8, iniPath);
-    if (configured >= 16)
-        g_requestedSamples = 16;
-    else if (configured >= 8)
-        g_requestedSamples = 8;
+    const size_t room = static_cast<size_t>(MAX_PATH - (slash + 1 - basePath));
+    wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix.ini");
+    wcscpy_s(g_iniPath, basePath);
+    wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix.log");
+    wcscpy_s(g_logPath, basePath);
+    wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix");
+    wcscpy_s(g_dumpBasePath, basePath);
+
+    g_enabled = GetPrivateProfileIntW(L"general", L"isEnabled", 1, g_iniPath) != 0;
+    g_logging = GetPrivateProfileIntW(L"general", L"logging", 0, g_iniPath) != 0;
+    g_dumpEnabled =
+        GetPrivateProfileIntW(L"general", L"dumpPreviews", 0, g_iniPath) != 0;
+    g_dumpPending = g_dumpEnabled;
+
+    const int configured = GetPrivateProfileIntW(L"antiAliasing", L"supersample",
+                                                 2, g_iniPath);
+    if (configured >= 8)
+        g_requestedFactor = 8;
     else if (configured >= 4)
-        g_requestedSamples = 4;
+        g_requestedFactor = 4;
+    else if (configured >= 2)
+        g_requestedFactor = 2;
     else
-        g_requestedSamples = 2;
+        g_requestedFactor = 1;
+
+    if (g_logging)
+        DeleteFileW(g_logPath);
+    Log("Mirror Anti-Aliasing Fix loaded: isEnabled=%d supersample=%d",
+        g_enabled ? 1 : 0, g_requestedFactor);
 }
 
 IDirect3DDevice9* GetDevice() {
@@ -108,7 +159,18 @@ IDirect3DDevice9* GetDevice() {
         reinterpret_cast<GetD3DDeviceFn>(kRwD3D9GetCurrentDevice)());
 }
 
+void ReleaseDownsampleChain() {
+    for (int i = 0; i < kMaxDownsampleStages; ++i) {
+        if (g_downsampleChain[i]) {
+            g_downsampleChain[i]->Release();
+            g_downsampleChain[i] = nullptr;
+        }
+    }
+    g_downsampleCount = 0;
+}
+
 void ReleaseResolveTargets() {
+    ReleaseDownsampleChain();
     if (g_msaaDepth) {
         g_msaaDepth->Release();
         g_msaaDepth = nullptr;
@@ -120,7 +182,7 @@ void ReleaseResolveTargets() {
     g_surfaceDevice = nullptr;
     g_colorDesc = {};
     g_depthFormat = D3DFMT_UNKNOWN;
-    g_activeSamples = D3DMULTISAMPLE_NONE;
+    g_activeFactor = 0;
 }
 
 void ReleaseFrameSurfaces() {
@@ -133,7 +195,6 @@ void ReleaseFrameSurfaces() {
         g_resolveColor = nullptr;
     }
     g_resolveActive = false;
-    g_haveOldMultisampleState = false;
 }
 
 bool HasStencil(D3DFORMAT format) {
@@ -146,19 +207,27 @@ bool CreateResolveTargets(IDirect3DDevice9* device,
                           const D3DSURFACE_DESC& depth) {
     ReleaseResolveTargets();
 
-    int samples = g_requestedSamples;
-    while (samples >= 2) {
-        auto type = static_cast<D3DMULTISAMPLE_TYPE>(samples);
+    // Plain, single sample surfaces at a multiple of the mirror size. The sister
+    // project for SA-MP preview textdraws measured that rendering an off-screen
+    // camera pass into a multisampled target loses the depth comparison, at
+    // every sample count, while the same swap into a single sample target
+    // reproduces the original image exactly. Supersampling does the
+    // anti-aliasing here for the same reason, and it smooths texture detail
+    // inside the reflection as well as its silhouettes.
+    int factor = g_requestedFactor;
+    while (factor >= 1) {
+        const UINT width = color.Width * static_cast<UINT>(factor);
+        const UINT height = color.Height * static_cast<UINT>(factor);
         IDirect3DSurface9* colorSurface = nullptr;
         IDirect3DSurface9* depthSurface = nullptr;
 
         HRESULT colorResult = device->CreateRenderTarget(
-            color.Width, color.Height, color.Format, type, 0, FALSE,
+            width, height, color.Format, D3DMULTISAMPLE_NONE, 0, FALSE,
             &colorSurface, nullptr);
         HRESULT depthResult = E_FAIL;
         if (SUCCEEDED(colorResult)) {
             depthResult = device->CreateDepthStencilSurface(
-                color.Width, color.Height, depth.Format, type, 0, TRUE,
+                width, height, depth.Format, D3DMULTISAMPLE_NONE, 0, FALSE,
                 &depthSurface, nullptr);
         }
 
@@ -168,17 +237,44 @@ bool CreateResolveTargets(IDirect3DDevice9* device,
             g_msaaDepth = depthSurface;
             g_colorDesc = color;
             g_depthFormat = depth.Format;
-            g_activeSamples = type;
+            g_activeFactor = factor;
+
+            // StretchRect filters bilinearly and therefore reads only a 2x2
+            // neighbourhood, so a single 4x or 8x reduction would discard most
+            // of the rendered image instead of averaging it. Halving repeatedly
+            // keeps every step at exactly 2:1, where the bilinear tap lands in
+            // the centre of each 2x2 block and averages all four texels.
+            for (int step = factor / 2; step >= 2; step /= 2) {
+                IDirect3DSurface9* stage = nullptr;
+                if (FAILED(device->CreateRenderTarget(
+                        color.Width * static_cast<UINT>(step),
+                        color.Height * static_cast<UINT>(step), color.Format,
+                        D3DMULTISAMPLE_NONE, 0, FALSE, &stage, nullptr))) {
+                    Log("downsample stage %dx could not be created", step);
+                    ReleaseDownsampleChain();
+                    break;
+                }
+                g_downsampleChain[g_downsampleCount++] = stage;
+            }
+
+            Log("created %ux%u supersampled pair for a %ux%u mirror (%dx), "
+                "color format %u, depth format %u, %d intermediate stage(s)",
+                width, height, color.Width, color.Height, factor,
+                static_cast<unsigned>(color.Format),
+                static_cast<unsigned>(depth.Format), g_downsampleCount);
             return true;
         }
 
+        Log("%dx supersampling rejected: color 0x%08X, depth 0x%08X", factor,
+            static_cast<unsigned>(colorResult), static_cast<unsigned>(depthResult));
         if (depthSurface)
             depthSurface->Release();
         if (colorSurface)
             colorSurface->Release();
-        samples /= 2;
+        factor /= 2;
     }
 
+    Log("no supersampling factor accepted for %ux%u", color.Width, color.Height);
     return false;
 }
 
@@ -186,10 +282,63 @@ bool EnsureResolveTargets(IDirect3DDevice9* device,
                           const D3DSURFACE_DESC& color,
                           const D3DSURFACE_DESC& depth) {
     if (g_msaaColor && g_msaaDepth && g_surfaceDevice == device &&
+        g_activeFactor == g_requestedFactor &&
         g_colorDesc.Width == color.Width && g_colorDesc.Height == color.Height &&
         g_colorDesc.Format == color.Format && g_depthFormat == depth.Format)
         return true;
     return CreateResolveTargets(device, color, depth);
+}
+
+// Writes the surface currently bound as render target 0 to an uncompressed
+// 32-bit TGA next to the plugin, so the reflection can be measured as a file
+// instead of judged from a screenshot of the finished frame.
+void DumpRenderTarget(IDirect3DDevice9* device, const wchar_t* tag) {
+    IDirect3DSurface9* source = nullptr;
+    if (FAILED(device->GetRenderTarget(0, &source)) || !source)
+        return;
+
+    D3DSURFACE_DESC desc = {};
+    IDirect3DSurface9* readable = nullptr;
+    D3DLOCKED_RECT locked = {};
+
+    if (SUCCEEDED(source->GetDesc(&desc)) &&
+        SUCCEEDED(device->CreateOffscreenPlainSurface(
+            desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &readable,
+            nullptr)) &&
+        SUCCEEDED(device->GetRenderTargetData(source, readable)) &&
+        SUCCEEDED(readable->LockRect(&locked, nullptr, D3DLOCK_READONLY))) {
+        wchar_t path[MAX_PATH] = {};
+        swprintf_s(path, L"%s-mirror-%02d-%s.tga", g_dumpBasePath, g_dumpIndex,
+                   tag);
+
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path, L"wb") == 0 && file) {
+            const auto width = static_cast<uint16_t>(desc.Width);
+            const auto height = static_cast<uint16_t>(desc.Height);
+            uint8_t header[18] = {};
+            header[2] = 2;   // uncompressed true colour
+            memcpy(&header[12], &width, 2);
+            memcpy(&header[14], &height, 2);
+            header[16] = 32; // bits per pixel
+            header[17] = 0x28;
+            fwrite(header, 1, sizeof(header), file);
+
+            const auto* rows = static_cast<const uint8_t*>(locked.pBits);
+            for (UINT y = 0; y < desc.Height; ++y)
+                fwrite(rows + static_cast<size_t>(y) * locked.Pitch, 4,
+                       desc.Width, file);
+            fclose(file);
+
+            Log("dumped mirror %02d: %ux%u format %u", g_dumpIndex, desc.Width,
+                desc.Height, static_cast<unsigned>(desc.Format));
+        }
+        readable->UnlockRect();
+        ++g_dumpIndex;
+    }
+
+    if (readable)
+        readable->Release();
+    source->Release();
 }
 
 bool ActivateResolveTargets(IDirect3DDevice9* device) {
@@ -224,9 +373,10 @@ int __cdecl RsCameraBeginUpdateHook(void* camera) {
     if (!device)
         return result;
 
+    if (!g_enabled)
+        return result;
+
     ReleaseFrameSurfaces();
-    g_haveOldMultisampleState = SUCCEEDED(device->GetRenderState(
-        D3DRS_MULTISAMPLEANTIALIAS, &g_oldMultisampleState));
     if (FAILED(device->GetRenderTarget(0, &g_resolveColor)) || !g_resolveColor ||
         FAILED(device->GetDepthStencilSurface(&g_resolveDepth)) || !g_resolveDepth) {
         ReleaseFrameSurfaces();
@@ -251,20 +401,20 @@ int __cdecl RsCameraBeginUpdateHook(void* camera) {
     return result;
 }
 
-void __cdecl DefinedStateForMirrorHook() {
-    reinterpret_cast<void(__cdecl*)()>(kDefinedState)();
-    if (g_resolveActive) {
-        if (IDirect3DDevice9* device = GetDevice())
-            device->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
-    }
-}
-
 void* __cdecl RwCameraEndUpdateHook(void* camera) {
     void* result = reinterpret_cast<RwCameraEndUpdateFn>(
         kRwCameraEndUpdate)(camera);
 
-    if (!g_resolveActive)
+    if (!g_resolveActive) {
+        // The fix being off is a valid state to sample: the render target then
+        // still holds exactly what the game drew by itself.
+        if (g_dumpPending && !g_enabled) {
+            g_dumpPending = false;
+            if (IDirect3DDevice9* device = GetDevice())
+                DumpRenderTarget(device, L"off");
+        }
         return result;
+    }
 
     IDirect3DDevice9* device = GetDevice();
     if (device && g_resolveColor && g_resolveDepth && g_msaaColor) {
@@ -273,13 +423,34 @@ void* __cdecl RwCameraEndUpdateHook(void* camera) {
         HRESULT depthResult = device->SetDepthStencilSurface(g_resolveDepth);
         HRESULT resolveResult = E_FAIL;
         if (SUCCEEDED(targetResult) && SUCCEEDED(depthResult)) {
-            resolveResult = device->StretchRect(g_msaaColor, nullptr,
-                                                g_resolveColor, nullptr,
-                                                D3DTEXF_NONE);
+            const D3DTEXTUREFILTERTYPE filter =
+                g_activeFactor > 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
+            IDirect3DSurface9* stageSource = g_msaaColor;
+            resolveResult = S_OK;
+            for (int i = 0; i < g_downsampleCount && SUCCEEDED(resolveResult);
+                 ++i) {
+                resolveResult =
+                    device->StretchRect(stageSource, nullptr,
+                                        g_downsampleChain[i], nullptr,
+                                        D3DTEXF_LINEAR);
+                stageSource = g_downsampleChain[i];
+            }
+            if (SUCCEEDED(resolveResult)) {
+                resolveResult = device->StretchRect(
+                    stageSource, nullptr, g_resolveColor, nullptr, filter);
+            }
         }
-        if (g_haveOldMultisampleState) {
-            device->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS,
-                                   g_oldMultisampleState);
+
+        if (!g_reportedResolve) {
+            g_reportedResolve = true;
+            Log("first resolve: target 0x%08X depth 0x%08X reduction 0x%08X",
+                static_cast<unsigned>(targetResult),
+                static_cast<unsigned>(depthResult),
+                static_cast<unsigned>(resolveResult));
+        }
+        if (g_dumpPending) {
+            g_dumpPending = false;
+            DumpRenderTarget(device, L"on");
         }
     }
 
@@ -322,24 +493,19 @@ bool InstallHooks() {
         !IsExecutableAddress(kBeforeMainRender) ||
         !IsExecutableAddress(kRsCameraBeginUpdate) ||
         !IsExecutableAddress(kRwCameraEndUpdate) ||
-        !IsExecutableAddress(kRwD3D9GetCurrentDevice) ||
-        !IsExecutableAddress(kDefinedState))
+        !IsExecutableAddress(kRwD3D9GetCurrentDevice))
         return false;
 
     const uintptr_t beginCall = FindRelativeCall(
         kBeforeMainRender, kBeforeMainRenderScanSize, kRsCameraBeginUpdate);
     const uintptr_t endCall = FindRelativeCall(
         kBeforeMainRender, kBeforeMainRenderScanSize, kRwCameraEndUpdate);
-    const uintptr_t definedStateCall = FindRelativeCall(
-        kBeforeMainRender, kBeforeMainRenderScanSize, kDefinedState);
-    if (!beginCall || !endCall || !definedStateCall)
+    if (!beginCall || !endCall)
         return false;
 
     // The end hook is harmless without the begin hook, so install it first.
     if (!RedirectRelativeCall(endCall,
                               reinterpret_cast<uintptr_t>(&RwCameraEndUpdateHook)) ||
-        !RedirectRelativeCall(definedStateCall,
-                              reinterpret_cast<uintptr_t>(&DefinedStateForMirrorHook)) ||
         !RedirectRelativeCall(beginCall,
                               reinterpret_cast<uintptr_t>(&RsCameraBeginUpdateHook)))
         return false;
