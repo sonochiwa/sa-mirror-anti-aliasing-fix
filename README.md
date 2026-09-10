@@ -34,7 +34,7 @@ scope.
 - Automatic fallback to a lower factor when a surface cannot be allocated.
 - Matching depth/stencil surface at the rendering resolution.
 - No resizing or post-processing of the mirror texture itself.
-- Optional diagnostic log and mirror dumps.
+- Optional diagnostic log.
 
 ## Requirements
 
@@ -70,7 +70,6 @@ The default `MirrorAntiAliasingFix.ini` is:
 [general]
 isEnabled=1
 logging=0
-dumpPreviews=0
 
 [antiAliasing]
 supersample=2
@@ -80,7 +79,6 @@ supersample=2
 | --- | ---: | --- |
 | `isEnabled` | `1` | Master switch. `0` leaves the game's own mirror rendering untouched. |
 | `logging` | `0` | Writes `MirrorAntiAliasingFix.log` next to the plugin. The file is recreated on every start. |
-| `dumpPreviews` | `0` | Diagnostic mode. Writes the first mirror of the session to a 32-bit TGA next to the plugin, from the plugin's own path or the game's own, depending on `isEnabled`. |
 | `supersample` | `2` | Rendering resolution multiplier for the reflected scene. Values are normalized to `1`, `2`, `4` or `8`; `1` disables anti-aliasing while keeping the rest of the path. |
 
 Settings are read once when the plugin loads.

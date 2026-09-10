@@ -14,8 +14,7 @@
   image.
 - Replaced `sampleCount` with `supersample`, defaulting to `2`. A mirror pass
   draws the whole reflected scene, so each step costs four times the pixels.
-- Added `isEnabled`, plus an optional diagnostic log and mirror dumps for
-  measuring what the plugin produced.
+- Added `isEnabled` and an optional diagnostic log.
 - Removed the `DefinedState` hook, which existed only to re-assert the
   multisample render state.
 
