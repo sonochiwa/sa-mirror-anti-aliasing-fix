@@ -34,7 +34,6 @@ scope.
 - Automatic fallback to a lower factor when a surface cannot be allocated.
 - Matching depth/stencil surface at the rendering resolution.
 - No resizing or post-processing of the mirror texture itself.
-- Optional diagnostic log.
 
 ## Requirements
 
@@ -67,26 +66,19 @@ The default `MirrorAntiAliasingFix.ini` is:
 # Created by sonochiwa
 # Source code: https://github.com/sonochiwa/sa-mirror-anti-aliasing-fix
 
-[general]
-isEnabled=1
-logging=0
-
 [antiAliasing]
-supersample=2
+supersample=4
 ```
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `isEnabled` | `1` | Master switch. `0` leaves the game's own mirror rendering untouched. |
-| `logging` | `0` | Writes `MirrorAntiAliasingFix.log` next to the plugin. The file is recreated on every start. |
-| `supersample` | `2` | Rendering resolution multiplier for the reflected scene. Values are normalized to `1`, `2`, `4` or `8`; `1` disables anti-aliasing while keeping the rest of the path. |
+| `supersample` | `4` | Rendering resolution multiplier for the reflected scene. Values are normalized to `1`, `2`, `4` or `8`; `1` disables anti-aliasing while keeping the rest of the path. |
 
 Settings are read once when the plugin loads.
 
 A mirror pass draws the whole reflected scene, so each step of `supersample`
-costs four times the pixels of the previous one. `2` is the default for that
-reason; `4` and above are worth measuring against the frame rate before keeping
-them.
+costs four times the pixels of the previous one. `8` is worth measuring against
+the frame rate before keeping it.
 
 ## Building
 
