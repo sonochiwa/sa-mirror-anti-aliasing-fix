@@ -38,15 +38,11 @@ int g_requestedFactor = 2;
 int g_activeFactor = 0;
 bool g_enabled = true;
 bool g_logging = false;
-bool g_dumpEnabled = false;
-bool g_dumpPending = false;
-int g_dumpIndex = 0;
 bool g_resolveActive = false;
 bool g_reportedResolve = false;
 bool g_installed = false;
 wchar_t g_iniPath[MAX_PATH] = {};
 wchar_t g_logPath[MAX_PATH] = {};
-wchar_t g_dumpBasePath[MAX_PATH] = {};
 
 void Log(const char* format, ...) {
     if (!g_logging || g_logPath[0] == L'\0')
@@ -128,14 +124,9 @@ void LoadConfiguration(HMODULE module) {
     wcscpy_s(g_iniPath, basePath);
     wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix.log");
     wcscpy_s(g_logPath, basePath);
-    wcscpy_s(slash + 1, room, L"MirrorAntiAliasingFix");
-    wcscpy_s(g_dumpBasePath, basePath);
 
     g_enabled = GetPrivateProfileIntW(L"general", L"isEnabled", 1, g_iniPath) != 0;
     g_logging = GetPrivateProfileIntW(L"general", L"logging", 0, g_iniPath) != 0;
-    g_dumpEnabled =
-        GetPrivateProfileIntW(L"general", L"dumpPreviews", 0, g_iniPath) != 0;
-    g_dumpPending = g_dumpEnabled;
 
     const int configured = GetPrivateProfileIntW(L"antiAliasing", L"supersample",
                                                  2, g_iniPath);
@@ -289,58 +280,6 @@ bool EnsureResolveTargets(IDirect3DDevice9* device,
     return CreateResolveTargets(device, color, depth);
 }
 
-// Writes the surface currently bound as render target 0 to an uncompressed
-// 32-bit TGA next to the plugin, so the reflection can be measured as a file
-// instead of judged from a screenshot of the finished frame.
-void DumpRenderTarget(IDirect3DDevice9* device, const wchar_t* tag) {
-    IDirect3DSurface9* source = nullptr;
-    if (FAILED(device->GetRenderTarget(0, &source)) || !source)
-        return;
-
-    D3DSURFACE_DESC desc = {};
-    IDirect3DSurface9* readable = nullptr;
-    D3DLOCKED_RECT locked = {};
-
-    if (SUCCEEDED(source->GetDesc(&desc)) &&
-        SUCCEEDED(device->CreateOffscreenPlainSurface(
-            desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &readable,
-            nullptr)) &&
-        SUCCEEDED(device->GetRenderTargetData(source, readable)) &&
-        SUCCEEDED(readable->LockRect(&locked, nullptr, D3DLOCK_READONLY))) {
-        wchar_t path[MAX_PATH] = {};
-        swprintf_s(path, L"%s-mirror-%02d-%s.tga", g_dumpBasePath, g_dumpIndex,
-                   tag);
-
-        FILE* file = nullptr;
-        if (_wfopen_s(&file, path, L"wb") == 0 && file) {
-            const auto width = static_cast<uint16_t>(desc.Width);
-            const auto height = static_cast<uint16_t>(desc.Height);
-            uint8_t header[18] = {};
-            header[2] = 2;   // uncompressed true colour
-            memcpy(&header[12], &width, 2);
-            memcpy(&header[14], &height, 2);
-            header[16] = 32; // bits per pixel
-            header[17] = 0x28;
-            fwrite(header, 1, sizeof(header), file);
-
-            const auto* rows = static_cast<const uint8_t*>(locked.pBits);
-            for (UINT y = 0; y < desc.Height; ++y)
-                fwrite(rows + static_cast<size_t>(y) * locked.Pitch, 4,
-                       desc.Width, file);
-            fclose(file);
-
-            Log("dumped mirror %02d: %ux%u format %u", g_dumpIndex, desc.Width,
-                desc.Height, static_cast<unsigned>(desc.Format));
-        }
-        readable->UnlockRect();
-        ++g_dumpIndex;
-    }
-
-    if (readable)
-        readable->Release();
-    source->Release();
-}
-
 bool ActivateResolveTargets(IDirect3DDevice9* device) {
     HRESULT result = device->SetDepthStencilSurface(nullptr);
     if (SUCCEEDED(result))
@@ -405,16 +344,8 @@ void* __cdecl RwCameraEndUpdateHook(void* camera) {
     void* result = reinterpret_cast<RwCameraEndUpdateFn>(
         kRwCameraEndUpdate)(camera);
 
-    if (!g_resolveActive) {
-        // The fix being off is a valid state to sample: the render target then
-        // still holds exactly what the game drew by itself.
-        if (g_dumpPending && !g_enabled) {
-            g_dumpPending = false;
-            if (IDirect3DDevice9* device = GetDevice())
-                DumpRenderTarget(device, L"off");
-        }
+    if (!g_resolveActive)
         return result;
-    }
 
     IDirect3DDevice9* device = GetDevice();
     if (device && g_resolveColor && g_resolveDepth && g_msaaColor) {
@@ -447,10 +378,6 @@ void* __cdecl RwCameraEndUpdateHook(void* camera) {
                 static_cast<unsigned>(targetResult),
                 static_cast<unsigned>(depthResult),
                 static_cast<unsigned>(resolveResult));
-        }
-        if (g_dumpPending) {
-            g_dumpPending = false;
-            DumpRenderTarget(device, L"on");
         }
     }
 
