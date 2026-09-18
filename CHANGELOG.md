@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1
+
+- Added creation of `MirrorAntiAliasingFix.ini` next to the plugin when it is
+  missing, byte for byte the canonical file.
+- Added version information to the plugin file.
+- Removed `README.txt` from the release archive; the repository README is the
+  documentation.
+
 ## 1.1.0
 
 - Changed the anti-aliasing from multisampling to supersampling. The reflected

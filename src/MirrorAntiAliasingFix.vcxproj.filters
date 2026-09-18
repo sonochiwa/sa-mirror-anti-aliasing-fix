@@ -1,0 +1,27 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="MirrorAntiAliasingFix.cpp" />
+    <ClCompile Include="config.cpp" />
+    <ClCompile Include="patch.cpp" />
+    <ClCompile Include="supersample.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="addresses.h" />
+    <ClInclude Include="config.h" />
+    <ClInclude Include="patch.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="supersample.h" />
+    <ClInclude Include="version.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="MirrorAntiAliasingFix.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\.github\workflows\release.yml" />
+    <None Include="..\CHANGELOG.md" />
+    <None Include="..\LICENSE" />
+    <None Include="..\README.md" />
+    <None Include="..\Config\MirrorAntiAliasingFix.ini" />
+  </ItemGroup>
+</Project>
