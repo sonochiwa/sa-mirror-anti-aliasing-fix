@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- Added `README.txt` to the release archive.
+
 ## 1.1.1
 
 - Added creation of `MirrorAntiAliasingFix.ini` next to the plugin when it is

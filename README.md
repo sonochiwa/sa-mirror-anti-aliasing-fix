@@ -16,7 +16,6 @@ out of scope.
 - Falls back to a lower factor when video memory runs out.
 - Verifies the bytes it replaces before writing and refuses to patch any
   other executable.
-- Creates the default INI when it is missing.
 
 ## Requirements
 
@@ -37,14 +36,8 @@ Remove any older copy of `MirrorReflectionFix.asi` and its INI first.
 
 ## Configuration
 
-```ini
-# Mirror Anti-Aliasing Fix v1.1.1
-# Created by sonochiwa
-# Source code: https://github.com/sonochiwa/sa-mirror-anti-aliasing-fix
-
-[antiAliasing]
-supersample=4
-```
+`MirrorAntiAliasingFix.ini` next to the plugin, created with these defaults
+when it is missing:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
